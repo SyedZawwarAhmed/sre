@@ -93,51 +93,12 @@ export class GoogleAIConnector extends LLMConnector {
 
     protected async request({ acRequest, body, context }: ILLMRequestFuncParams): Promise<TLLMChatResponse> {
         try {
-            const contents = body.messages;
-            delete body.messages;
-
             const genAI = await this.getClient(context);
 
-            // Build configuration object
-            const config: any = {};
+            // Extract messages and structure payload for Google AI API
+            const { messages: contents, ...requestPayload } = body;
 
-            // Add generation config
-            if (body.generationConfig) {
-                if (body.generationConfig.temperature !== undefined) config.temperature = body.generationConfig.temperature;
-                if (body.generationConfig.topK !== undefined) config.topK = body.generationConfig.topK;
-                if (body.generationConfig.topP !== undefined) config.topP = body.generationConfig.topP;
-                if (body.generationConfig.maxOutputTokens !== undefined) config.maxOutputTokens = body.generationConfig.maxOutputTokens;
-                if (body.generationConfig.stopSequences) config.stopSequences = body.generationConfig.stopSequences;
-                if (body.generationConfig.responseMimeType) config.responseMimeType = body.generationConfig.responseMimeType;
-            }
-
-            // Add tools configuration
-            if (body.tools) config.tools = body.tools;
-            if (body.toolConfig) config.toolConfig = body.toolConfig;
-
-            // Add thinking support
-            if (body.thinkingBudget !== undefined) config.thinkingBudget = body.thinkingBudget;
-            if (body.includeThoughts) config.includeThoughts = body.includeThoughts;
-
-            // Add response modalities (for image generation)
-            if (body.responseModalities) config.responseModalities = body.responseModalities;
-
-            const requestPayload: any = {
-                model: body.model,
-                contents: contents,
-            };
-
-            // Add system instruction
-            if (body.systemInstruction) {
-                requestPayload.systemInstruction = body.systemInstruction;
-            }
-
-            // Add config if not empty
-            if (Object.keys(config).length > 0) {
-                requestPayload.config = config;
-            }
-
-            const result = await genAI.models.generateContent(requestPayload);
+            const result = await genAI.models.generateContent({ ...requestPayload, contents });
 
             const content = result.text;
             const finishReason = result.candidates?.[0]?.finishReason || 'stop';
@@ -207,48 +168,12 @@ export class GoogleAIConnector extends LLMConnector {
     protected async streamRequest({ acRequest, body, context }: ILLMRequestFuncParams): Promise<EventEmitter> {
         const emitter = new EventEmitter();
 
-        const contents = body.messages;
-        delete body.messages;
-
         const genAI = await this.getClient(context);
 
-        // Build configuration object for streaming
-        const config: any = {};
+        // Extract messages and structure payload for Google AI API
+        const { messages: contents, ...requestPayload } = body;
 
-        // Add generation config
-        if (body.generationConfig) {
-            if (body.generationConfig.temperature !== undefined) config.temperature = body.generationConfig.temperature;
-            if (body.generationConfig.topK !== undefined) config.topK = body.generationConfig.topK;
-            if (body.generationConfig.topP !== undefined) config.topP = body.generationConfig.topP;
-            if (body.generationConfig.maxOutputTokens !== undefined) config.maxOutputTokens = body.generationConfig.maxOutputTokens;
-            if (body.generationConfig.stopSequences) config.stopSequences = body.generationConfig.stopSequences;
-            if (body.generationConfig.responseMimeType) config.responseMimeType = body.generationConfig.responseMimeType;
-        }
-
-        // Add tools configuration
-        if (body.tools) config.tools = body.tools;
-        if (body.toolConfig) config.toolConfig = body.toolConfig;
-
-        // Add thinking support
-        if (body.thinkingBudget !== undefined) config.thinkingBudget = body.thinkingBudget;
-        if (body.includeThoughts) config.includeThoughts = body.includeThoughts;
-
-        const requestPayload: any = {
-            model: body.model,
-            contents: contents,
-        };
-
-        // Add system instruction
-        if (body.systemInstruction) {
-            requestPayload.systemInstruction = body.systemInstruction;
-        }
-
-        // Add config if not empty
-        if (Object.keys(config).length > 0) {
-            requestPayload.config = config;
-        }
-
-        const result = await genAI.models.generateContentStream(requestPayload);
+        const result = await genAI.models.generateContentStream({ ...requestPayload, contents });
 
         let toolsData: ToolData[] = [];
         let usage: UsageMetadataWithThoughtsToken;
@@ -395,23 +320,32 @@ export class GoogleAIConnector extends LLMConnector {
             return this.prepareBodyForImageGenRequest(params) as any;
         }
 
-        const messages = await this.prepareMessages(params);
+        const messagesResult = await this.prepareMessages(params);
 
         let body: any = {
             model: model as string,
-            messages,
+            messages: Array.isArray(messagesResult) ? messagesResult : messagesResult.contents,
         };
+
+        // Preserve tools configuration if it exists (from prepareMessagesWithTools)
+        if (!Array.isArray(messagesResult)) {
+            if (messagesResult.tools) body.tools = messagesResult.tools;
+            if (messagesResult.toolConfig) body.toolConfig = messagesResult.toolConfig;
+            if (messagesResult.systemInstruction) body.systemInstruction = messagesResult.systemInstruction;
+        }
 
         const responseFormat = params?.responseFormat || '';
         let systemInstruction = '';
 
-        // Handle system instruction from params
-        if ((params as any).systemInstruction) {
-            systemInstruction += (params as any).systemInstruction + '\n';
-        }
+        // Handle system instruction from params (only if not already set from tools flow)
+        if (!body.systemInstruction) {
+            if ((params as any).systemInstruction) {
+                systemInstruction += (params as any).systemInstruction + '\n';
+            }
 
-        if (responseFormat === 'json') {
-            systemInstruction += JSON_RESPONSE_INSTRUCTION;
+            if (responseFormat === 'json') {
+                systemInstruction += JSON_RESPONSE_INSTRUCTION;
+            }
         }
 
         const config: any = {};
@@ -428,12 +362,19 @@ export class GoogleAIConnector extends LLMConnector {
             config.responseMimeType = 'application/json';
         }
 
-        // Thinking support
+        // Thinking support - auto-enable for reasoning-capable models
         if ((params as any).thinkingBudget !== undefined) {
             config.thinkingBudget = (params as any).thinkingBudget;
+        } else if (params.capabilities?.reasoning) {
+            // Set thinkingBudget to -1 (auto) for models with reasoning capabilities
+            config.thinkingBudget = -1;
         }
+
         if ((params as any).includeThoughts !== undefined) {
             config.includeThoughts = (params as any).includeThoughts;
+        } else if (params.capabilities?.reasoning) {
+            // Auto-enable includeThoughts for reasoning-capable models
+            config.includeThoughts = true;
         }
 
         // Response modalities for multimodal responses
@@ -451,9 +392,13 @@ export class GoogleAIConnector extends LLMConnector {
             config.videoConfig = (params as any).videoConfig;
         }
 
-        if (systemInstruction.trim()) body.systemInstruction = systemInstruction.trim();
+        if (systemInstruction.trim() && !body.systemInstruction) {
+            body.systemInstruction = systemInstruction.trim();
+        }
+
+        // Structure body to match Google AI API format directly
         if (Object.keys(config).length > 0) {
-            body.generationConfig = config;
+            body.config = config; // Use 'config' instead of 'generationConfig' for API
         }
 
         return body;
@@ -741,8 +686,7 @@ export class GoogleAIConnector extends LLMConnector {
         if (files.length > 0) {
             return await this.prepareMessagesWithFiles(params);
         } else if (params?.toolsConfig?.tools?.length > 0) {
-            const toolsPrompt = await this.prepareMessagesWithTools(params);
-            return toolsPrompt.contents;
+            return await this.prepareMessagesWithTools(params);
         } else {
             return await this.prepareMessagesWithTextQuery(params);
         }
